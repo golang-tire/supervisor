@@ -1,5 +1,7 @@
-Suture
+Supervisor
 ======
+this repo i a renamed fork of [suture](github.com/thejerf/suture)
+
 
 [![Build Status](https://travis-ci.org/thejerf/suture.png?branch=master)](https://travis-ci.org/thejerf/suture)
 
