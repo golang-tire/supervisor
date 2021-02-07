@@ -31,6 +31,7 @@ const (
 
 type EventStopTimeout struct {
 	Supervisor     *Supervisor `json:"-"`
+	Version        string      `json:"version"`
 	SupervisorName string      `json:"supervisor_name"`
 	Service        Service     `json:"-"`
 	ServiceName    string      `json:"service"`
@@ -57,6 +58,7 @@ func (e EventStopTimeout) Map() map[string]interface{} {
 
 type EventServicePanic struct {
 	Supervisor       *Supervisor `json:"-"`
+	Version          string      `json:"version"`
 	SupervisorName   string      `json:"supervisor_name"`
 	Service          Service     `json:"-"`
 	ServiceName      string      `json:"service_name"`
@@ -89,6 +91,7 @@ func (e EventServicePanic) String() string {
 func (e EventServicePanic) Map() map[string]interface{} {
 	return map[string]interface{}{
 		"supervisor_name":   e.SupervisorName,
+		"version":           e.Version,
 		"service_name":      e.ServiceName,
 		"current_failures":  e.CurrentFailures,
 		"failure_threshold": e.FailureThreshold,
@@ -101,6 +104,7 @@ func (e EventServicePanic) Map() map[string]interface{} {
 type EventServiceTerminate struct {
 	Supervisor       *Supervisor `json:"-"`
 	SupervisorName   string      `json:"supervisor_name"`
+	Version          string      `json:"version"`
 	Service          Service     `json:"-"`
 	ServiceName      string      `json:"service_name"`
 	CurrentFailures  float64     `json:"current_failures"`
@@ -123,6 +127,7 @@ func (e EventServiceTerminate) String() string {
 func (e EventServiceTerminate) Map() map[string]interface{} {
 	return map[string]interface{}{
 		"supervisor_name":   e.SupervisorName,
+		"version":           e.Version,
 		"service_name":      e.ServiceName,
 		"current_failures":  e.CurrentFailures,
 		"failure_threshold": e.FailureThreshold,
@@ -144,6 +149,7 @@ func serviceFailureString(supervisor, service string, currentFailures, failureTh
 
 type EventBackoff struct {
 	Supervisor     *Supervisor `json:"-"`
+	Version        string      `json:"version"`
 	SupervisorName string      `json:"supervisor_name"`
 }
 
@@ -158,11 +164,13 @@ func (e EventBackoff) String() string {
 func (e EventBackoff) Map() map[string]interface{} {
 	return map[string]interface{}{
 		"supervisor_name": e.SupervisorName,
+		"version":         e.Version,
 	}
 }
 
 type EventResume struct {
 	Supervisor     *Supervisor `json:"-"`
+	Version        string      `json:"version"`
 	SupervisorName string      `json:"supervisor_name"`
 }
 
@@ -177,5 +185,6 @@ func (e EventResume) String() string {
 func (e EventResume) Map() map[string]interface{} {
 	return map[string]interface{}{
 		"supervisor_name": e.SupervisorName,
+		"version":         e.Version,
 	}
 }

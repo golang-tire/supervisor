@@ -278,7 +278,7 @@ func (s *Supervisor) Add(service Service) ServiceToken {
 		id := s.serviceCounter
 		s.serviceCounter++
 
-		s.services[id] = serviceWithName{service, serviceName(service)}
+		s.services[id] = serviceWithName{Service: service, name: serviceName(service)}
 		s.restartQueue = append(s.restartQueue, id)
 
 		s.m.Unlock()
@@ -287,10 +287,10 @@ func (s *Supervisor) Add(service Service) ServiceToken {
 	s.m.Unlock()
 
 	response := make(chan serviceID)
-	if s.sendControl(addService{service, serviceName(service), response}) != nil {
+	if s.sendControl(addService{service: service, name: serviceName(service), response: response}) != nil {
 		return ServiceToken{}
 	}
-	return ServiceToken{uint64(s.id)<<32 | uint64(<-response)}
+	return ServiceToken{id: uint64(s.id)<<32 | uint64(<-response)}
 }
 
 // ServeBackground starts running a supervisor in its own goroutine. When
@@ -382,7 +382,7 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 				id := s.serviceCounter
 				s.serviceCounter++
 
-				s.services[id] = serviceWithName{msg.service, msg.name}
+				s.services[id] = serviceWithName{Service: msg.service, name: msg.name}
 				s.runService(ctx, msg.service, id)
 
 				msg.response <- id
@@ -392,7 +392,7 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 				msg.done <- s.stopSupervisor()
 				return nil
 			case listServices:
-				services := []Service{}
+				var services []Service
 				for _, service := range s.services {
 					services = append(services, service.Service)
 				}
@@ -415,7 +415,7 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 			s.state = normal
 			s.m.Unlock()
 			s.failures = 0
-			s.spec.EventHook(EventResume{s, s.Name})
+			s.spec.EventHook(EventResume{Supervisor: s, SupervisorName: s.Name, Version: s.Version})
 			for _, id := range s.restartQueue {
 				namedService, present := s.services[id]
 				if present {
@@ -478,7 +478,7 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 		s.m.Lock()
 		s.state = paused
 		s.m.Unlock()
-		s.spec.EventHook(EventBackoff{s, s.Name})
+		s.spec.EventHook(EventBackoff{Supervisor: s, Version: s.Version, SupervisorName: s.Name})
 		s.resumeTimer = s.getAfterChan(
 			s.spec.BackoffJitter.Jitter(s.spec.FailureBackoff))
 	}
@@ -579,8 +579,12 @@ func (s *Supervisor) removeService(id serviceID, notificationChan chan struct{})
 				// Life is good!
 			case <-s.getAfterChan(s.spec.Timeout):
 				s.spec.EventHook(EventStopTimeout{
-					s, s.Name,
-					namedService.Service, namedService.name})
+					Supervisor:     s,
+					Version:        s.Version,
+					SupervisorName: s.Name,
+					Service:        namedService.Service,
+					ServiceName:    namedService.name,
+				})
 			}
 			s.notifyServiceDone <- id
 		}()
@@ -617,8 +621,11 @@ SHUTTING_DOWN_SERVICES:
 		case <-timeout:
 			for _, namedService := range s.servicesShuttingDown {
 				s.spec.EventHook(EventStopTimeout{
-					s, s.Name,
-					namedService.Service, namedService.name,
+					Supervisor:     s,
+					Version:        s.Version,
+					SupervisorName: s.Name,
+					Service:        namedService.Service,
+					ServiceName:    namedService.name,
 				})
 			}
 
@@ -722,7 +729,7 @@ func (s *Supervisor) RemoveAndWait(id ServiceToken, timeout time.Duration) error
 
 	notificationC := make(chan struct{})
 
-	sentControlErr := s.sendControl(removeService{serviceID(id.id & 0xffffffff), notificationC})
+	sentControlErr := s.sendControl(removeService{id: serviceID(id.id & 0xffffffff), notification: notificationC})
 
 	if sentControlErr != nil {
 		return sentControlErr
