@@ -260,8 +260,8 @@ func serviceName(service Service) (serviceName string) {
 
 // NewSimple is a convenience function to create a service with just a name
 // and the sensible defaults.
-func NewSimple(name string) (*Supervisor, error) {
-	return New(name, defaultVersion)
+func NewSimple(name string, opts ...Option) (*Supervisor, error) {
+	return New(name, defaultVersion, opts...)
 }
 
 // HasSupervisor is an interface that indicates the given struct contains a
@@ -371,7 +371,7 @@ func (s *Supervisor) Serve() error {
 	for _, id := range s.restartQueue {
 		namedService, present := s.services[id]
 		if present {
-			s.runService(s.ctx, namedService.Service, id)
+			s.runService(namedService.Service, id)
 		}
 	}
 	s.restartQueue = make([]serviceID, 0, 1)
@@ -409,7 +409,7 @@ func (s *Supervisor) Serve() error {
 				s.serviceCounter++
 
 				s.services[id] = serviceWithName{Service: msg.service, name: msg.name}
-				s.runService(s.ctx, msg.service, id)
+				s.runService(msg.service, id)
 
 				msg.response <- id
 			case removeService:
@@ -445,7 +445,7 @@ func (s *Supervisor) Serve() error {
 			for _, id := range s.restartQueue {
 				namedService, present := s.services[id]
 				if present {
-					s.runService(s.ctx, namedService.Service, id)
+					s.runService(namedService.Service, id)
 				}
 			}
 			s.restartQueue = make([]serviceID, 0, 1)
@@ -520,7 +520,7 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 		curState := s.state
 		s.m.Unlock()
 		if curState == normal {
-			s.runService(ctx, failedService.Service, id)
+			s.runService(failedService.Service, id)
 		} else {
 			s.restartQueue = append(s.restartQueue, id)
 		}
@@ -554,8 +554,8 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 	}
 }
 
-func (s *Supervisor) runService(ctx context.Context, service Service, id serviceID) {
-	childCtx, cancel := context.WithCancel(ctx)
+func (s *Supervisor) runService(service Service, id serviceID) {
+	childCtx, cancel := context.WithCancel(s.ctx)
 	done := make(chan struct{})
 	blockingCancellation := func() {
 		cancel()

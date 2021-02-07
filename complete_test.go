@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -29,17 +31,18 @@ func (i *IncrementorJob) Serve(ctx context.Context) error {
 }
 
 func TestCompleteJob(t *testing.T) {
-	supervisor := NewSimple("Supervisor")
+
+	supervisor, err := NewSimple("Supervisor")
+	assert.Nil(t, err)
+	assert.NotNil(t, supervisor)
+
 	service := &IncrementorJob{0, make(chan int)}
 	supervisor.Add(service)
 
-	ctx, myCancel := context.WithCancel(context.Background())
-	supervisor.ServeBackground(ctx)
+	supervisor.ServeBackground()
 
 	fmt.Println("Got:", <-service.next)
 	fmt.Println("Got:", <-service.next)
-
-	myCancel()
 
 	// Output:
 	// Got: 1

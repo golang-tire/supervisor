@@ -34,16 +34,17 @@ func (i *Incrementor) Serve(ctx context.Context) error {
 }
 
 func ExampleNew_simple() {
-	supervisor := NewSimple("Supervisor")
+	supervisor, err := NewSimple("Supervisor")
+	if err != nil {
+		panic(err)
+	}
 	service := &Incrementor{0, make(chan int), make(chan bool)}
 	supervisor.Add(service)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	supervisor.ServeBackground(ctx)
+	supervisor.ServeBackground()
 
 	fmt.Println("Got:", <-service.next)
 	fmt.Println("Got:", <-service.next)
-	cancel()
 
 	// We sync here just to guarantee the output of "Stopping the service"
 	<-service.stop

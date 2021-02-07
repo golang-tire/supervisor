@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -25,8 +27,10 @@ var everMultistarted = false
 // Test that supervisors work perfectly when everything is hunky dory.
 func TestTheHappyCase(t *testing.T) {
 	// t.Parallel()
-
-	s := NewSimple("A")
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := NewSimple("A", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
 	if s.String() != "A" {
 		t.Fatal("Can't get name from a supervisor")
 	}
@@ -34,8 +38,7 @@ func TestTheHappyCase(t *testing.T) {
 
 	s.Add(service)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
+	go s.Serve()
 
 	<-service.started
 
@@ -53,11 +56,14 @@ func TestTheHappyCase(t *testing.T) {
 func TestAddingToRunningSupervisor(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("A1")
-
 	ctx, cancel := context.WithCancel(context.Background())
-	s.ServeBackground(ctx)
 	defer cancel()
+
+	s, err := NewSimple("A1", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
+	s.ServeBackground()
 
 	service := NewService("B1")
 	s.Add(service)
@@ -74,16 +80,17 @@ func TestAddingToRunningSupervisor(t *testing.T) {
 func TestFailures(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("A2")
-	s.spec.FailureThreshold = 3.5
-
 	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
+	s, err := NewSimple("A2", WithFailureThreshold(3.5), WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
+	go s.Serve()
 	defer func() {
 		// to avoid deadlocks during shutdown, we have to not try to send
 		// things out on channels while we're shutting down (this undoes the
 		// LogFailure overide about 25 lines down)
-		s.spec.EventHook = func(Event) {}
+		s.EventHook = func(Event) {}
 		cancel()
 	}()
 	s.sync()
@@ -108,7 +115,7 @@ func TestFailures(t *testing.T) {
 
 	failNotify := make(chan bool)
 	// use this to synchronize on here
-	s.spec.EventHook = func(e Event) {
+	s.EventHook = func(e Event) {
 		switch e.Type() {
 		case EventTypeServiceTerminate:
 			failNotify <- e.(EventServiceTerminate).Restarting
@@ -164,7 +171,7 @@ func TestFailures(t *testing.T) {
 
 	nowFeeder.appendTimes(oneDecayLater)
 	backingoff := make(chan bool)
-	s.spec.EventHook = func(e Event) {
+	s.EventHook = func(e Event) {
 		switch e.Type() {
 		case EventTypeServiceTerminate:
 			failNotify <- e.(EventServiceTerminate).Restarting
@@ -223,32 +230,20 @@ func TestFailures(t *testing.T) {
 	}
 }
 
-func TestRunningAlreadyRunning(t *testing.T) {
-	// t.Parallel()
-
-	s := NewSimple("A3")
-	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
-	defer cancel()
-
-	// ensure the supervisor has made it to its main loop
-	s.sync()
-	if !panics(s.Serve) {
-		t.Fatal("Supervisor failed to prevent itself from double-running.")
-	}
-}
-
 func TestFullConstruction(t *testing.T) {
 	// t.Parallel()
 
-	s := New("Moo", Spec{
-		EventHook:        func(Event) {},
-		FailureDecay:     1,
-		FailureThreshold: 2,
-		FailureBackoff:   3,
-		Timeout:          time.Second * 29,
-	})
-	if s.String() != "Moo" || s.spec.FailureDecay != 1 || s.spec.FailureThreshold != 2 || s.spec.FailureBackoff != 3 || s.spec.Timeout != time.Second*29 {
+	s, err := New("Moo", "v1",
+		WithEventHook(func(Event) {}),
+		WithFailureDecay(1),
+		WithFailureThreshold(2),
+		WithFailureBackoff(3),
+		WithTimeout(time.Second*29),
+	)
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
+	if s.String() != "Moo" || s.FailureDecay != 1 || s.FailureThreshold != 2 || s.FailureBackoff != 3 || s.Timeout != time.Second*29 {
 		t.Fatal("Full construction failed somehow")
 	}
 }
@@ -257,15 +252,18 @@ func TestFullConstruction(t *testing.T) {
 func TestDefaultLogging(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("A4")
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := NewSimple("A4", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
 
 	service := NewService("B4")
 	s.Add(service)
 
-	s.spec.FailureThreshold = .5
-	s.spec.FailureBackoff = time.Millisecond * 25
-	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
+	s.FailureThreshold = .5
+	s.FailureBackoff = time.Millisecond * 25
+
+	go s.Serve()
 	s.sync()
 
 	<-service.started
@@ -284,8 +282,8 @@ func TestDefaultLogging(t *testing.T) {
 
 	service.take <- Happy
 
-	s.spec.EventHook(EventStopTimeout{s, s.Name, service, service.name})
-	s.spec.EventHook(EventServicePanic{
+	s.EventHook(EventStopTimeout{s, "v1", s.Name, service, service.name})
+	s.EventHook(EventServicePanic{
 		SupervisorName:   s.Name,
 		ServiceName:      service.name,
 		CurrentFailures:  1,
@@ -301,28 +299,33 @@ func TestDefaultLogging(t *testing.T) {
 func TestNestedSupervisors(t *testing.T) {
 	// t.Parallel()
 
-	super1 := NewSimple("Top5")
-	super2 := NewSimple("Nested5")
+	ctx, cancel := context.WithCancel(context.Background())
+	super1, err := NewSimple("Top5", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, super1)
+
+	super2, err := NewSimple("Nested5")
+	assert.Nil(t, err)
+	assert.NotNil(t, super2)
+
 	service := NewService("Service5")
 
-	super2.spec.EventHook = func(e Event) {
+	super2.EventHook = func(e Event) {
 		if e.Type() == EventTypeStopTimeout {
 			panic("Failed to copy LogBadStop")
 		}
 	}
 
-	super1.Add(super2)
 	super2.Add(service)
 
 	// test the functions got copied from super1; if this panics, it didn't
 	// get copied
-	super2.spec.EventHook(EventStopTimeout{
-		super2, super2.Name,
+	super2.EventHook(EventStopTimeout{
+		super2, "v1", super2.Name,
 		service, service.name,
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go super1.Serve(ctx)
+	go super1.Serve()
 	super1.sync()
 
 	<-service.started
@@ -333,14 +336,16 @@ func TestNestedSupervisors(t *testing.T) {
 
 func TestStoppingSupervisorStopsServices(t *testing.T) {
 	// t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := NewSimple("Top6", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
 
-	s := NewSimple("Top6")
 	service := NewService("Service 6")
 
 	s.Add(service)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
+	go s.Serve()
 	s.sync()
 
 	<-service.started
@@ -362,13 +367,16 @@ func TestStoppingSupervisorStopsServices(t *testing.T) {
 func TestStoppingStillWorksWithHungServices(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("Top7")
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := NewSimple("Top7", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
 	service := NewService("Service WillHang7")
 
 	s.Add(service)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
+	go s.Serve()
 
 	<-service.started
 
@@ -380,7 +388,7 @@ func TestStoppingStillWorksWithHungServices(t *testing.T) {
 		return resumeChan
 	}
 	failNotify := make(chan struct{})
-	s.spec.EventHook = func(e Event) {
+	s.EventHook = func(e Event) {
 		if e.Type() == EventTypeStopTimeout {
 			failNotify <- struct{}{}
 		}
@@ -400,13 +408,16 @@ func TestStoppingStillWorksWithHungServices(t *testing.T) {
 func TestRemovingHungService(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("TopHungService")
+	s, err := NewSimple("TopHungService")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
 	failNotify := make(chan struct{})
 	resumeChan := make(chan time.Time)
 	s.getAfterChan = func(d time.Duration) <-chan time.Time {
 		return resumeChan
 	}
-	s.spec.EventHook = func(e Event) {
+	s.EventHook = func(e Event) {
 		if e.Type() == EventTypeStopTimeout {
 			failNotify <- struct{}{}
 		}
@@ -415,7 +426,7 @@ func TestRemovingHungService(t *testing.T) {
 
 	sToken := s.Add(service)
 
-	go s.Serve(context.Background())
+	go s.Serve()
 
 	<-service.started
 	service.take <- Hang
@@ -430,17 +441,20 @@ func TestRemovingHungService(t *testing.T) {
 func TestRemoveService(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("Top")
+	s, err := NewSimple("Top")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
 	service := NewService("ServiceToRemove8")
 
 	id := s.Add(service)
 
-	go s.Serve(context.Background())
+	go s.Serve()
 
 	<-service.started
 	service.take <- UseStopChan
 
-	err := s.Remove(id)
+	err = s.Remove(id)
 	if err != nil {
 		t.Fatal("Removing service somehow failed")
 	}
@@ -459,13 +473,17 @@ func TestRemoveService(t *testing.T) {
 func TestServiceReport(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("Top")
-	s.spec.Timeout = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := NewSimple("Top", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
+	s.Timeout = time.Millisecond
 	service := NewService("ServiceName")
 
 	id := s.Add(service)
-	ctx, cancel := context.WithCancel(context.Background())
-	go s.Serve(ctx)
+
+	go s.Serve()
 
 	<-service.started
 	service.take <- Hang
@@ -485,157 +503,30 @@ func TestServiceReport(t *testing.T) {
 	}
 }
 
-func TestFailureToConstruct(t *testing.T) {
-	// t.Parallel()
-
-	var s *Supervisor
-
-	panics(s.Serve)
-
-	s = new(Supervisor)
-	panics(s.Serve)
-}
-
-func TestFailingSupervisors(t *testing.T) {
-	// t.Parallel()
-
-	// This is a bit of a complicated test, so let me explain what
-	// all this is doing:
-	// 1. Set up a top-level supervisor with a hair-trigger backoff.
-	// 2. Add a supervisor to that.
-	// 3. To that supervisor, add a service.
-	// 4. Panic the supervisor in the middle, sending the top-level into
-	//    backoff.
-	// 5. Kill the lower level service too.
-	// 6. Verify that when the top-level service comes out of backoff,
-	//    the service ends up restarted as expected.
-
-	// Ultimately, we can't have more than a best-effort recovery here.
-	// A panic'ed supervisor can't really be trusted to have consistent state,
-	// and without *that*, we can't trust it to do anything sensible with
-	// the children it may have been running. So unlike Erlang, we can't
-	// can't really expect to be able to safely restart them or anything.
-	// Really, the "correct" answer is that the Supervisor must never panic,
-	// but in the event that it does, this verifies that it at least tries
-	// to get on with life.
-
-	// This also tests that if a Supervisor itself panics, and one of its
-	// monitored services goes down in the meantime, that the monitored
-	// service also gets correctly restarted when the supervisor does.
-
-	s1 := NewSimple("Top9")
-	s2 := NewSimple("Nested9")
-	service := NewService("Service9")
-
-	s1.Add(s2)
-	s2.Add(service)
-
-	// start the top-level supervisor...
-	ctx, cancel := context.WithCancel(context.Background())
-	go s1.Serve(ctx)
-	defer cancel()
-	// and sync on the service being started.
-	<-service.started
-
-	// Set the failure threshold such that even one failure triggers
-	// backoff on the top-level supervisor.
-	s1.spec.FailureThreshold = .5
-
-	// This lets us control exactly when the top-level supervisor comes
-	// back from its backoff, by forcing it to block on this channel
-	// being sent something in order to come back.
-	resumeChan := make(chan time.Time)
-	s1.getAfterChan = func(d time.Duration) <-chan time.Time {
-		return resumeChan
-	}
-	failNotify := make(chan string)
-	// synchronize on the expected failure of the middle supervisor
-	s1.spec.EventHook = func(e Event) {
-		if e.Type() == EventTypeServicePanic {
-			failNotify <- fmt.Sprintf("%s", e.(EventServicePanic).Service)
-		}
-	}
-
-	// Now, the middle supervisor panics and dies.
-	s2.panic()
-
-	// Receive the notification from the hacked log message from the
-	// top-level supervisor that the middle has failed.
-	failing := <-failNotify
-	// that's enough sync to guarantee this:
-	if failing != "Nested9" || s1.state != paused {
-		t.Fatal("Top-level supervisor did not go into backoff as expected")
-	}
-
-	// Tell the service to fail. Note the top-level supervisor has
-	// still not restarted the middle supervisor.
-	service.take <- Fail
-
-	// We now permit the top-level supervisor to resume. It should
-	// restart the middle supervisor, which should then restart the
-	// child service...
-	resumeChan <- time.Time{}
-
-	// which we can pick up from here. If this successfully restarts,
-	// then the whole chain must have worked.
-	<-service.started
-}
-
-func TestNilSupervisorAdd(t *testing.T) {
-	// t.Parallel()
-
-	var s *Supervisor
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("did not panic as expected on nil add")
-		}
-	}()
-
-	s.Add(s)
-}
-
 func TestPassNoContextToSupervisor(t *testing.T) {
-	s := NewSimple("main")
+
+	s, err := NewSimple("main")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
 	service := NewService("B")
 	s.Add(service)
 
-	go s.Serve(nil)
+	go s.Serve()
 	<-service.started
 
 	s.ctxCancel()
 }
 
-func TestNilSupervisorPanicsAsExpected(t *testing.T) {
-	s := (*Supervisor)(nil)
-	if !panicsWith(s.Serve, "with a nil *suture.Supervisor") {
-		t.Fatal("nil supervisor doesn't panic as expected")
-	}
-}
-
-// https://github.com/thejerf/suture/issues/11
-//
-// The purpose of this test is to verify that it does not cause data races,
-// so there are no obvious assertions.
-func TestIssue11(t *testing.T) {
-	// t.Parallel()
-
-	s := NewSimple("main")
-	s.ServeBackground(context.Background())
-
-	subsuper := NewSimple("sub")
-	s.Add(subsuper)
-
-	subsuper.Add(NewService("may cause data race"))
-}
-
 func TestRemoveAndWait(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("main")
-	s.spec.Timeout = time.Second
 	ctx, cancel := context.WithCancel(context.Background())
-	s.ServeBackground(ctx)
+	s, err := NewSimple("main", WithContext(ctx))
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+	s.Timeout = time.Second
+
+	s.ServeBackground()
 
 	service := NewService("A1")
 	token := s.Add(service)
@@ -644,7 +535,7 @@ func TestRemoveAndWait(t *testing.T) {
 	// Normal termination case; without the useStopChan flag on the
 	// NewService, this will just terminate. So we can freely use a long
 	// timeout, because it should not trigger.
-	err := s.RemoveAndWait(token, time.Second)
+	err = s.RemoveAndWait(token, time.Second)
 	if err != nil {
 		t.Fatal("Happy case for RemoveAndWait failed: " + err.Error())
 	}
@@ -685,10 +576,13 @@ func TestRemoveAndWait(t *testing.T) {
 
 	// Abnormal case: The service takes long to terminate, which takes more than the timeout of the spec, but
 	// if the service eventually terminates, this does not hang RemoveAndWait.
-	s = NewSimple("main")
-	s.spec.Timeout = time.Millisecond
+	s, err = NewSimple("main")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
+	s.Timeout = time.Millisecond
 	ctx, cancel = context.WithCancel(context.Background())
-	s.ServeBackground(ctx)
+	s.ServeBackground()
 	defer cancel()
 	service = NewService("A1")
 	token = s.Add(service)
@@ -706,24 +600,8 @@ func TestRemoveAndWait(t *testing.T) {
 	}
 }
 
-func TestSupervisorManagementIssue35(t *testing.T) {
-	s := NewSimple("issue 35")
-
-	for i := 1; i < 100; i++ {
-		s2 := NewSimple("test")
-		s.Add(s2)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.ServeBackground(ctx)
-	// should not have any panics
-	cancel()
-}
-
 func TestCoverage(t *testing.T) {
-	New("testing coverage", Spec{
-		EventHook: func(Event) {},
-	})
+	New("testing coverage", "", WithEventHook(func(Event) {}))
 	NoJitter{}.Jitter(time.Millisecond)
 }
 
@@ -732,17 +610,19 @@ func TestStopAfterRemoveAndWait(t *testing.T) {
 
 	var badStopError error
 
-	s := NewSimple("main")
-	s.spec.Timeout = time.Second
-	s.spec.EventHook = func(e Event) {
-		if e.Type() == EventTypeStopTimeout {
-			ev := e.(EventStopTimeout)
-			badStopError = fmt.Errorf("%s: Service %s failed to terminate in a timely manner", ev.Supervisor, ev.Service)
-		}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	s.ServeBackground(ctx)
+	s, err := NewSimple("main",
+		WithContext(ctx),
+		WithTimeout(time.Second),
+		WithEventHook(func(e Event) {
+			if e.Type() == EventTypeStopTimeout {
+				ev := e.(EventStopTimeout)
+				badStopError = fmt.Errorf("%s: Service %s failed to terminate in a timely manner", ev.Supervisor, ev.Service)
+			}
+		}),
+	)
+
+	s.ServeBackground()
 
 	service := NewService("A1")
 	token := s.Add(service)
@@ -750,7 +630,7 @@ func TestStopAfterRemoveAndWait(t *testing.T) {
 	<-service.started
 	service.take <- UseStopChan
 
-	err := s.RemoveAndWait(token, time.Second)
+	err = s.RemoveAndWait(token, time.Second)
 	if err != nil {
 		t.Fatal("Happy case for RemoveAndWait failed: " + err.Error())
 	}
@@ -760,93 +640,6 @@ func TestStopAfterRemoveAndWait(t *testing.T) {
 
 	if badStopError != nil {
 		t.Fatal("Unexpected timeout while stopping supervisor: " + badStopError.Error())
-	}
-}
-
-// This tests that the entire supervisor tree is terminated when a service
-// returns returns ErrTerminateTree directly.
-func TestServiceAndTreeTermination(t *testing.T) {
-	// t.Parallel()
-	s1 := NewSimple("TestTreeTermination1")
-	s2 := NewSimple("TestTreeTermination2")
-	s1.Add(s2)
-
-	service1 := NewService("TestTreeTerminationService1")
-	service2 := NewService("TestTreeTerminationService2")
-	service3 := NewService("TestTreeTerminationService2")
-	s2.Add(service1)
-	s2.Add(service2)
-	s2.Add(service3)
-
-	terminated := make(chan struct{})
-	go func() {
-		// we don't need the context because the service is going
-		// to terminate the supervisor.
-		s1.Serve(nil)
-		terminated <- struct{}{}
-	}()
-
-	<-service1.started
-	<-service2.started
-	<-service3.started
-
-	// OK, everything is up and running. Start by telling one service
-	// to terminate itself, and verify it isn't restarted.
-	service3.take <- DoNotRestart
-
-	// I've got nothing other than just waiting for a suitable period
-	// of time and hoping for the best here; it's hard to synchronize
-	// on an event not happening...!
-	time.Sleep(250 * time.Microsecond)
-	service3.m.Lock()
-	service3Running := service3.running
-	service3.m.Unlock()
-
-	if service3Running {
-		t.Fatal("service3 was restarted")
-	}
-
-	service1.take <- TerminateTree
-	<-terminated
-
-	if service1.running || service2.running || service3.running {
-		t.Fatal("Didn't shut services & tree down properly.")
-	}
-}
-
-// Test that supervisors set to not propagate service failures upwards will
-// not kill the whole tree.
-func TestDoNotPropagate(t *testing.T) {
-	s1 := NewSimple("TestDoNotPropagate")
-	s2 := New("TestDoNotPropgate Subtree", Spec{DontPropagateTermination: true})
-
-	s1.Add(s2)
-
-	service1 := NewService("should keep running")
-	service2 := NewService("should end up terminating")
-	s1.Add(service1)
-	s2.Add(service2)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go s1.Serve(ctx)
-	defer cancel()
-
-	<-service1.started
-	<-service2.started
-
-	fmt.Println("Service about to take")
-	service2.take <- TerminateTree
-	fmt.Println("Service took")
-	time.Sleep(time.Millisecond)
-
-	if service2.running {
-		t.Fatal("service 2 should have terminated")
-	}
-	if s2.state != terminated {
-		t.Fatal("child supervisor should be terminated")
-	}
-	if s1.state != normal {
-		t.Fatal("parent supervisor should be running")
 	}
 }
 
@@ -867,19 +660,19 @@ func TestEverMultistarted(t *testing.T) {
 func TestAddAfterStopping(t *testing.T) {
 	// t.Parallel()
 
-	s := NewSimple("main")
-	ctx, cancel := context.WithCancel(context.Background())
+	s, err := NewSimple("main")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
 
 	service := NewService("A1")
 	supDone := make(chan struct{})
 	addDone := make(chan struct{})
 
 	go func() {
-		s.Serve(ctx)
+		s.Serve()
 		close(supDone)
 	}()
 
-	cancel()
 	<-supDone
 
 	go func() {
@@ -958,12 +751,6 @@ func (s *FailableService) Serve(ctx context.Context) error {
 			case DoNotRestart:
 				return ErrDoNotRestart
 			}
-		case <-ctx.Done():
-			s.existing--
-			if useStopChan {
-				s.stop <- true
-			}
-			return ctx.Err()
 		}
 	}
 }
