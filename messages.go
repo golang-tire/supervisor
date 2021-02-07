@@ -1,4 +1,4 @@
-package suture
+package supervisor
 
 // sum type pattern for type-safe message passing; see
 // http://www.jerf.org/iri/post/2917
@@ -29,25 +29,25 @@ type syncSupervisor struct {
 
 func (ss syncSupervisor) isSupervisorMessage() {}
 
-func (s *Supervisor) fail(id serviceID, err interface{}, stacktrace []byte) {
-	s.control <- serviceFailed{id, err, stacktrace}
+func (s *Supervisor) fail(id serviceID, panicMsg string, stacktrace []byte) {
+	s.control <- serviceFailed{id, panicMsg, stacktrace}
 }
 
 type serviceFailed struct {
 	id         serviceID
-	err        interface{}
+	panicMsg   string
 	stacktrace []byte
 }
 
 func (sf serviceFailed) isSupervisorMessage() {}
 
-func (s *Supervisor) serviceEnded(id serviceID, complete bool) {
-	s.sendControl(serviceEnded{id, complete})
+func (s *Supervisor) serviceEnded(id serviceID, err error) {
+	s.sendControl(serviceEnded{id, err})
 }
 
 type serviceEnded struct {
-	id       serviceID
-	complete bool
+	id  serviceID
+	err error
 }
 
 func (s serviceEnded) isSupervisorMessage() {}

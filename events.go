@@ -1,4 +1,4 @@
-package suture
+package supervisor
 
 import (
 	"fmt"

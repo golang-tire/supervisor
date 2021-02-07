@@ -51,4 +51,4 @@ See the Example for an example, using a simple service that serves out
 incrementing integers.
 
 */
-package suture
+package supervisor

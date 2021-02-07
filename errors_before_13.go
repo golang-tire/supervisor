@@ -1,6 +1,6 @@
 // +build !go1.13
 
-package suture
+package supervisor
 
 func isErr(err error, target error) bool {
 	return err == target

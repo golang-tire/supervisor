@@ -1,6 +1,6 @@
 // +build go1.13
 
-package suture
+package supervisor
 
 import "errors"
 

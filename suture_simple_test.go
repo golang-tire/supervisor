@@ -1,6 +1,9 @@
-package suture
+package supervisor
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type Incrementor struct {
 	current int
@@ -13,17 +16,19 @@ func (i *Incrementor) Stop() {
 	i.stop <- true
 }
 
-func (i *Incrementor) Serve() {
+func (i *Incrementor) Serve(ctx context.Context) error {
 	for {
 		select {
 		case i.next <- i.current:
 			i.current++
-		case <-i.stop:
-			// We sync here just to guarantee the output of "Stopping the service",
-			// so this passes the test reliably.
-			// Most services would simply "return" here.
+		case <-ctx.Done():
+			// This message on i.stop is just to synchronize
+			// this test with the example code so the output is
+			// consistent for the test code; most services
+			// would just "return nil" here.
+			fmt.Println("Stopping the service")
 			i.stop <- true
-			return
+			return nil
 		}
 	}
 }
@@ -33,11 +38,12 @@ func ExampleNew_simple() {
 	service := &Incrementor{0, make(chan int), make(chan bool)}
 	supervisor.Add(service)
 
-	supervisor.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	supervisor.ServeBackground(ctx)
 
 	fmt.Println("Got:", <-service.next)
 	fmt.Println("Got:", <-service.next)
-	supervisor.Stop()
+	cancel()
 
 	// We sync here just to guarantee the output of "Stopping the service"
 	<-service.stop
