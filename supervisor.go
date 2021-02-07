@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+const defaultVersion = "v0.1.0"
+
 const (
 	notRunning = iota
 	normal
@@ -57,7 +59,8 @@ try to .Add() services immediately afterward.
 
 */
 type Supervisor struct {
-	Name string
+	Name    string
+	Version string
 
 	spec Spec
 
@@ -100,7 +103,7 @@ type Supervisor struct {
 
 New is the full constructor function for a supervisor.
 
-The name is a friendly human name for the supervisor, used in logging. Suture
+The name is a friendly human name for the supervisor, used in logging. Supervisor
 does not care if this is unique, but it is good for your sanity if it is.
 
 If not set, the following values are used:
@@ -147,61 +150,63 @@ this supervisor will itself return an error that will terminate its
 parent. If true, it will merely return ErrDoNotRestart. false by default.
 
 */
-func New(name string, spec Spec) *Supervisor {
+func New(name, version string, spec Spec) *Supervisor {
 	spec.configureDefaults(name)
 
 	return &Supervisor{
-		name,
+		Name: name,
 
-		spec,
+		Version: version,
+
+		spec: spec,
 
 		// services
-		make(map[serviceID]serviceWithName),
+		services: make(map[serviceID]serviceWithName),
 		// cancellations
-		make(map[serviceID]context.CancelFunc),
+		cancellations: make(map[serviceID]context.CancelFunc),
 		// servicesShuttingDown
-		make(map[serviceID]serviceWithName),
+		servicesShuttingDown: make(map[serviceID]serviceWithName),
 		// lastFail, deliberately the zero time
-		time.Time{},
+		lastFail: time.Time{},
 		// failures
-		0,
+		failures: 0,
 		// restartQueue
-		make([]serviceID, 0, 1),
+		restartQueue: make([]serviceID, 0, 1),
 		// serviceCounter
-		0,
+		serviceCounter: 0,
 		// control
-		make(chan supervisorMessage),
+		control: make(chan supervisorMessage),
 		// notifyServiceDone
-		make(chan serviceID),
+		notifyServiceDone: make(chan serviceID),
 		// resumeTimer
-		make(chan time.Time),
+		resumeTimer: make(chan time.Time),
 
 		// liveness
-		make(chan struct{}),
+		liveness: make(chan struct{}),
 
-		sync.Mutex{},
+		ctxMutex: sync.Mutex{},
 		// ctx
-		nil,
+		ctx: nil,
 		// myCancel
-		nil,
+		ctxCancel: nil,
 
 		// the tests can override these for testing threshold
 		// behavior
 		// getNow
-		time.Now,
+		getNow: time.Now,
 		// getAfterChan
-		time.After,
+		getAfterChan: time.After,
 
 		// m
-		sync.Mutex{},
+		m: sync.Mutex{},
 
 		// unstoppedServiceReport
-		nil,
+		unstoppedServiceReport: nil,
 
 		// id
-		nextSupervisorID(),
+		id: nextSupervisorID(),
 		// state
-		notRunning,
+		state: notRunning,
 	}
 }
 
@@ -218,7 +223,7 @@ func serviceName(service Service) (serviceName string) {
 // NewSimple is a convenience function to create a service with just a name
 // and the sensible defaults.
 func NewSimple(name string) *Supervisor {
-	return New(name, Spec{})
+	return New(name, defaultVersion, Spec{})
 }
 
 // HasSupervisor is an interface that indicates the given struct contains a
