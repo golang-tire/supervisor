@@ -62,8 +62,6 @@ type Supervisor struct {
 	Name    string
 	Version string
 
-	spec Spec
-
 	services             map[serviceID]serviceWithName
 	cancellations        map[serviceID]context.CancelFunc
 	servicesShuttingDown map[serviceID]serviceWithName
@@ -97,6 +95,16 @@ type Supervisor struct {
 	// malign leftovers
 	id    supervisorID
 	state uint8
+
+	// Spec
+	EventHook                EventHook
+	FailureDecay             float64
+	FailureThreshold         float64
+	FailureBackoff           time.Duration
+	BackoffJitter            Jitter
+	Timeout                  time.Duration
+	PassThroughPanics        bool
+	DontPropagateTermination bool
 }
 
 /*
@@ -150,15 +158,11 @@ this supervisor will itself return an error that will terminate its
 parent. If true, it will merely return ErrDoNotRestart. false by default.
 
 */
-func New(name, version string, spec Spec) *Supervisor {
-	spec.configureDefaults(name)
+func New(name, version string, opts ...Option) (*Supervisor, error) {
 
-	return &Supervisor{
-		Name: name,
-
+	s := &Supervisor{
+		Name:    name,
 		Version: version,
-
-		spec: spec,
 
 		// services
 		services: make(map[serviceID]serviceWithName),
@@ -207,7 +211,41 @@ func New(name, version string, spec Spec) *Supervisor {
 		id: nextSupervisorID(),
 		// state
 		state: notRunning,
+
+		EventHook:                nil,
+		FailureDecay:             30,
+		FailureThreshold:         5,
+		FailureBackoff:           time.Second * 15,
+		BackoffJitter:            &DefaultJitter{},
+		Timeout:                  time.Second * 10,
+		PassThroughPanics:        false,
+		DontPropagateTermination: false,
 	}
+
+	// Apply options
+	for _, op := range opts {
+		if err := op(s); err != nil {
+			return nil, err
+		}
+	}
+
+	if s.EventHook == nil {
+		s.EventHook = func(e Event) {
+			log.Print(e)
+		}
+	}
+
+	// context documentation suggests that it is legal for functions to
+	// take nil contexts, it's user's responsibility to never pass them in.
+	if s.ctx == nil {
+		ctx, myCancel := context.WithCancel(s.ctx)
+		s.ctxMutex.Lock()
+		s.ctx = ctx
+		s.ctxMutex.Unlock()
+		s.ctxCancel = myCancel
+	}
+
+	return s, nil
 }
 
 func serviceName(service Service) (serviceName string) {
@@ -222,8 +260,8 @@ func serviceName(service Service) (serviceName string) {
 
 // NewSimple is a convenience function to create a service with just a name
 // and the sensible defaults.
-func NewSimple(name string) *Supervisor {
-	return New(name, defaultVersion, Spec{})
+func NewSimple(name string) (*Supervisor, error) {
+	return New(name, defaultVersion)
 }
 
 // HasSupervisor is an interface that indicates the given struct contains a
@@ -269,7 +307,7 @@ func (s *Supervisor) Add(service Service) ServiceToken {
 	if hasSupervisor, isHaveSupervisor := service.(HasSupervisor); isHaveSupervisor {
 		supervisor := hasSupervisor.GetSupervisor()
 		if supervisor != nil {
-			supervisor.spec.EventHook = s.spec.EventHook
+			supervisor.EventHook = s.EventHook
 		}
 	}
 
@@ -295,8 +333,8 @@ func (s *Supervisor) Add(service Service) ServiceToken {
 
 // ServeBackground starts running a supervisor in its own goroutine. When
 // this method returns, the supervisor is guaranteed to be in a running state.
-func (s *Supervisor) ServeBackground(ctx context.Context) {
-	go s.Serve(ctx)
+func (s *Supervisor) ServeBackground() {
+	go s.Serve()
 	s.sync()
 }
 
@@ -304,23 +342,11 @@ func (s *Supervisor) ServeBackground(ctx context.Context) {
 Serve starts the supervisor. You should call this on the top-level supervisor,
 but nothing else.
 */
-func (s *Supervisor) Serve(ctx context.Context) error {
-	// context documentation suggests that it is legal for functions to
-	// take nil contexts, it's user's responsibility to never pass them in.
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (s *Supervisor) Serve() error {
 
 	if s == nil {
 		panic("Can't serve with a nil *suture.Supervisor")
 	}
-	// Take a separate cancellation function so this tree can be
-	// indepedently cancelled.
-	ctx, myCancel := context.WithCancel(ctx)
-	s.ctxMutex.Lock()
-	s.ctx = ctx
-	s.ctxMutex.Unlock()
-	s.ctxCancel = myCancel
 
 	if s.id == 0 {
 		panic("Can't call Serve on an incorrectly-constructed *suture.Supervisor")
@@ -345,20 +371,20 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 	for _, id := range s.restartQueue {
 		namedService, present := s.services[id]
 		if present {
-			s.runService(ctx, namedService.Service, id)
+			s.runService(s.ctx, namedService.Service, id)
 		}
 	}
 	s.restartQueue = make([]serviceID, 0, 1)
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			s.stopSupervisor()
-			return ctx.Err()
+			return s.ctx.Err()
 		case m := <-s.control:
 			switch msg := m.(type) {
 			case serviceFailed:
-				s.handleFailedService(ctx, msg.id, msg.panicMsg, msg.stacktrace, true)
+				s.handleFailedService(s.ctx, msg.id, msg.panicMsg, msg.stacktrace, true)
 			case serviceEnded:
 				_, monitored := s.services[msg.id]
 				if monitored {
@@ -369,13 +395,13 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 						go cancel()
 					} else if isErr(msg.err, ErrTerminateSupervisorTree) {
 						s.stopSupervisor()
-						if s.spec.DontPropagateTermination {
+						if s.DontPropagateTermination {
 							return ErrDoNotRestart
 						} else {
 							return msg.err
 						}
 					} else {
-						s.handleFailedService(ctx, msg.id, msg.err, nil, false)
+						s.handleFailedService(s.ctx, msg.id, msg.err, nil, false)
 					}
 				}
 			case addService:
@@ -383,7 +409,7 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 				s.serviceCounter++
 
 				s.services[id] = serviceWithName{Service: msg.service, name: msg.name}
-				s.runService(ctx, msg.service, id)
+				s.runService(s.ctx, msg.service, id)
 
 				msg.response <- id
 			case removeService:
@@ -415,11 +441,11 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 			s.state = normal
 			s.m.Unlock()
 			s.failures = 0
-			s.spec.EventHook(EventResume{Supervisor: s, SupervisorName: s.Name, Version: s.Version})
+			s.EventHook(EventResume{Supervisor: s, SupervisorName: s.Name, Version: s.Version})
 			for _, id := range s.restartQueue {
 				namedService, present := s.services[id]
 				if present {
-					s.runService(ctx, namedService.Service, id)
+					s.runService(s.ctx, namedService.Service, id)
 				}
 			}
 			s.restartQueue = make([]serviceID, 0, 1)
@@ -470,17 +496,17 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 		s.failures = 1.0
 	} else {
 		sinceLastFail := now.Sub(s.lastFail).Seconds()
-		intervals := sinceLastFail / s.spec.FailureDecay
+		intervals := sinceLastFail / s.FailureDecay
 		s.failures = s.failures*math.Pow(.5, intervals) + 1
 	}
 
-	if s.failures > s.spec.FailureThreshold {
+	if s.failures > s.FailureThreshold {
 		s.m.Lock()
 		s.state = paused
 		s.m.Unlock()
-		s.spec.EventHook(EventBackoff{Supervisor: s, Version: s.Version, SupervisorName: s.Name})
+		s.EventHook(EventBackoff{Supervisor: s, Version: s.Version, SupervisorName: s.Name})
 		s.resumeTimer = s.getAfterChan(
-			s.spec.BackoffJitter.Jitter(s.spec.FailureBackoff))
+			s.BackoffJitter.Jitter(s.FailureBackoff))
 	}
 
 	s.lastFail = now
@@ -499,13 +525,13 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 			s.restartQueue = append(s.restartQueue, id)
 		}
 		if panic {
-			s.spec.EventHook(EventServicePanic{
+			s.EventHook(EventServicePanic{
 				Supervisor:       s,
 				SupervisorName:   s.Name,
 				Service:          failedService.Service,
 				ServiceName:      failedService.name,
 				CurrentFailures:  s.failures,
-				FailureThreshold: s.spec.FailureThreshold,
+				FailureThreshold: s.FailureThreshold,
 				Restarting:       curState == normal,
 				PanicMsg:         err.(string),
 				Stacktrace:       string(stacktrace),
@@ -517,13 +543,13 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 				Service:          failedService.Service,
 				ServiceName:      failedService.name,
 				CurrentFailures:  s.failures,
-				FailureThreshold: s.spec.FailureThreshold,
+				FailureThreshold: s.FailureThreshold,
 				Restarting:       curState == normal,
 			}
 			if err != nil {
 				e.Err = err
 			}
-			s.spec.EventHook(e)
+			s.EventHook(e)
 		}
 	}
 }
@@ -537,7 +563,7 @@ func (s *Supervisor) runService(ctx context.Context, service Service, id service
 	}
 	s.cancellations[id] = blockingCancellation
 	go func() {
-		if !s.spec.PassThroughPanics {
+		if !s.PassThroughPanics {
 			defer func() {
 				if r := recover(); r != nil {
 					buf := make([]byte, 65535)
@@ -577,8 +603,8 @@ func (s *Supervisor) removeService(id serviceID, notificationChan chan struct{})
 			select {
 			case <-successChan:
 				// Life is good!
-			case <-s.getAfterChan(s.spec.Timeout):
-				s.spec.EventHook(EventStopTimeout{
+			case <-s.getAfterChan(s.Timeout):
+				s.EventHook(EventStopTimeout{
 					Supervisor:     s,
 					Version:        s.Version,
 					SupervisorName: s.Name,
@@ -609,7 +635,7 @@ func (s *Supervisor) stopSupervisor() UnstoppedServiceReport {
 		}(id)
 	}
 
-	timeout := s.getAfterChan(s.spec.Timeout)
+	timeout := s.getAfterChan(s.Timeout)
 
 SHUTTING_DOWN_SERVICES:
 	for len(s.servicesShuttingDown) > 0 {
@@ -620,7 +646,7 @@ SHUTTING_DOWN_SERVICES:
 			delete(s.servicesShuttingDown, serviceID)
 		case <-timeout:
 			for _, namedService := range s.servicesShuttingDown {
-				s.spec.EventHook(EventStopTimeout{
+				s.EventHook(EventStopTimeout{
 					Supervisor:     s,
 					Version:        s.Version,
 					SupervisorName: s.Name,
@@ -850,41 +876,3 @@ var ErrSupervisorNotTerminated = errors.New("supervisor not terminated")
 // to a supervisor that has not started yet. See note on Supervisor struct
 // about the legal ways to start a supervisor.
 var ErrSupervisorNotStarted = errors.New("supervisor not started yet")
-
-// Spec is used to pass arguments to the New function to create a
-// supervisor. See the New function for full documentation.
-type Spec struct {
-	EventHook                EventHook
-	FailureDecay             float64
-	FailureThreshold         float64
-	FailureBackoff           time.Duration
-	BackoffJitter            Jitter
-	Timeout                  time.Duration
-	PassThroughPanics        bool
-	DontPropagateTermination bool
-}
-
-func (s *Spec) configureDefaults(supervisorName string) {
-	if s.FailureDecay == 0 {
-		s.FailureDecay = 30
-	}
-	if s.FailureThreshold == 0 {
-		s.FailureThreshold = 5
-	}
-	if s.FailureBackoff == 0 {
-		s.FailureBackoff = time.Second * 15
-	}
-	if s.BackoffJitter == nil {
-		s.BackoffJitter = &DefaultJitter{}
-	}
-	if s.Timeout == 0 {
-		s.Timeout = time.Second * 10
-	}
-
-	// set up the default logging handlers
-	if s.EventHook == nil {
-		s.EventHook = func(e Event) {
-			log.Print(e)
-		}
-	}
-}
