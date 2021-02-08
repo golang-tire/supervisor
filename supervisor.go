@@ -9,15 +9,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"math/rand"
+	"os"
+	"os/signal"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
+
+	"go.uber.org/zap"
 )
 
-const defaultVersion = "v0.1.0"
+const (
+	defaultVersion                = "v0.1.0"
+	defaultTerminationGracePeriod = 5 * time.Second
+	defaultTerminationWaitPeriod  = 0 * time.Second
+)
 
 const (
 	notRunning = iota
@@ -74,6 +82,9 @@ type Supervisor struct {
 	resumeTimer          <-chan time.Time
 	liveness             chan struct{}
 
+	logger             *zap.Logger
+	loggerRedirectUndo func()
+
 	// despite the recommendation in the context package to avoid
 	// holding this in a struct, I think due to the function of suture
 	// and the way it works, I think it's OK in this case. This is the
@@ -82,6 +93,11 @@ type Supervisor struct {
 	ctx      context.Context
 	// This function cancels this supervisor specifically.
 	ctxCancel func()
+
+	signals chan os.Signal
+
+	terminationGracePeriod time.Duration
+	terminationWaitPeriod  time.Duration
 
 	getNow       func() time.Time
 	getAfterChan func(time.Duration) <-chan time.Time
@@ -194,6 +210,11 @@ func New(name, version string, opts ...Option) (*Supervisor, error) {
 		// myCancel
 		ctxCancel: nil,
 
+		terminationGracePeriod: defaultTerminationGracePeriod,
+		terminationWaitPeriod:  defaultTerminationWaitPeriod,
+
+		signals: make(chan os.Signal, 5),
+
 		// the tests can override these for testing threshold
 		// behavior
 		// getNow
@@ -229,20 +250,15 @@ func New(name, version string, opts ...Option) (*Supervisor, error) {
 		}
 	}
 
-	if s.EventHook == nil {
-		s.EventHook = func(e Event) {
-			log.Print(e)
+	// assign a default logger with development level
+	if s.logger == nil {
+		if err := WithDevelopmentLogger()(s); err != nil {
+			return nil, err
 		}
 	}
 
-	// context documentation suggests that it is legal for functions to
-	// take nil contexts, it's user's responsibility to never pass them in.
-	if s.ctx == nil {
-		ctx, myCancel := context.WithCancel(s.ctx)
-		s.ctxMutex.Lock()
-		s.ctx = ctx
-		s.ctxMutex.Unlock()
-		s.ctxCancel = myCancel
+	if s.EventHook == nil {
+		s.EventHook = func(e Event) {}
 	}
 
 	return s, nil
@@ -300,6 +316,14 @@ logging functions.
 
 */
 func (s *Supervisor) Add(service Service) ServiceToken {
+	return s.addService("", service)
+}
+
+func (s *Supervisor) AddNamed(name string, service Service) ServiceToken {
+	return s.addService(name, service)
+}
+
+func (s *Supervisor) addService(name string, service Service) ServiceToken {
 	if s == nil {
 		panic("can't add service to nil *suture.Supervisor")
 	}
@@ -316,7 +340,11 @@ func (s *Supervisor) Add(service Service) ServiceToken {
 		id := s.serviceCounter
 		s.serviceCounter++
 
-		s.services[id] = serviceWithName{Service: service, name: serviceName(service)}
+		if name == "" {
+			name = serviceName(service)
+		}
+
+		s.services[id] = serviceWithName{Service: service, name: name}
 		s.restartQueue = append(s.restartQueue, id)
 
 		s.m.Unlock()
@@ -333,8 +361,8 @@ func (s *Supervisor) Add(service Service) ServiceToken {
 
 // ServeBackground starts running a supervisor in its own goroutine. When
 // this method returns, the supervisor is guaranteed to be in a running state.
-func (s *Supervisor) ServeBackground() {
-	go s.Serve()
+func (s *Supervisor) ServeBackground(ctx context.Context) {
+	go s.Serve(ctx)
 	s.sync()
 }
 
@@ -342,7 +370,13 @@ func (s *Supervisor) ServeBackground() {
 Serve starts the supervisor. You should call this on the top-level supervisor,
 but nothing else.
 */
-func (s *Supervisor) Serve() error {
+func (s *Supervisor) Serve(ctx context.Context) error {
+
+	// context documentation suggests that it is legal for functions to
+	// take nil contexts, it's user's responsibility to never pass them in.
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	if s == nil {
 		panic("Can't serve with a nil *suture.Supervisor")
@@ -351,6 +385,14 @@ func (s *Supervisor) Serve() error {
 	if s.id == 0 {
 		panic("Can't call Serve on an incorrectly-constructed *suture.Supervisor")
 	}
+
+	// Take a separate cancellation function so this tree can be
+	// indepedently cancelled.
+	ctx, myCancel := context.WithCancel(ctx)
+	s.ctxMutex.Lock()
+	s.ctx = ctx
+	s.ctxMutex.Unlock()
+	s.ctxCancel = myCancel
 
 	s.m.Lock()
 	if s.state == normal || s.state == paused {
@@ -371,20 +413,26 @@ func (s *Supervisor) Serve() error {
 	for _, id := range s.restartQueue {
 		namedService, present := s.services[id]
 		if present {
-			s.runService(namedService.Service, id)
+			s.runService(ctx, namedService.Service, id)
 		}
 	}
 	s.restartQueue = make([]serviceID, 0, 1)
 
+	signal.Notify(s.signals, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGABRT)
+
 	for {
 		select {
-		case <-s.ctx.Done():
+		case sig := <-s.signals:
+			s.logger.Warn("os termination signal", zap.String("signal", sig.String()))
+			s.shutdown()
+			return nil
+		case <-ctx.Done():
 			s.stopSupervisor()
-			return s.ctx.Err()
+			return ctx.Err()
 		case m := <-s.control:
 			switch msg := m.(type) {
 			case serviceFailed:
-				s.handleFailedService(s.ctx, msg.id, msg.panicMsg, msg.stacktrace, true)
+				s.handleFailedService(ctx, msg.id, msg.panicMsg, msg.stacktrace, true)
 			case serviceEnded:
 				_, monitored := s.services[msg.id]
 				if monitored {
@@ -401,7 +449,7 @@ func (s *Supervisor) Serve() error {
 							return msg.err
 						}
 					} else {
-						s.handleFailedService(s.ctx, msg.id, msg.err, nil, false)
+						s.handleFailedService(ctx, msg.id, msg.err, nil, false)
 					}
 				}
 			case addService:
@@ -409,7 +457,7 @@ func (s *Supervisor) Serve() error {
 				s.serviceCounter++
 
 				s.services[id] = serviceWithName{Service: msg.service, name: msg.name}
-				s.runService(msg.service, id)
+				s.runService(ctx, msg.service, id)
 
 				msg.response <- id
 			case removeService:
@@ -442,15 +490,24 @@ func (s *Supervisor) Serve() error {
 			s.m.Unlock()
 			s.failures = 0
 			s.EventHook(EventResume{Supervisor: s, SupervisorName: s.Name, Version: s.Version})
+			s.logger.Info("supervisor exiting backoff state.", zap.String("Supervisor", s.Name), zap.String("version", s.Version))
 			for _, id := range s.restartQueue {
 				namedService, present := s.services[id]
 				if present {
-					s.runService(namedService.Service, id)
+					s.runService(ctx, namedService.Service, id)
 				}
 			}
 			s.restartQueue = make([]serviceID, 0, 1)
 		}
 	}
+}
+
+/*
+Stop stops the supervisor
+*/
+func (s *Supervisor) Stop() error {
+	s.stopSupervisor()
+	return nil
 }
 
 // UnstoppedServiceReport will return a report of what services failed to
@@ -505,6 +562,7 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 		s.state = paused
 		s.m.Unlock()
 		s.EventHook(EventBackoff{Supervisor: s, Version: s.Version, SupervisorName: s.Name})
+		s.logger.Info("supervisor entering the backoff state.", zap.String("supervisor", s.Name), zap.String("version", s.Version))
 		s.resumeTimer = s.getAfterChan(
 			s.BackoffJitter.Jitter(s.FailureBackoff))
 	}
@@ -520,7 +578,7 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 		curState := s.state
 		s.m.Unlock()
 		if curState == normal {
-			s.runService(failedService.Service, id)
+			s.runService(ctx, failedService.Service, id)
 		} else {
 			s.restartQueue = append(s.restartQueue, id)
 		}
@@ -536,6 +594,15 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 				PanicMsg:         err.(string),
 				Stacktrace:       string(stacktrace),
 			})
+			s.logger.Error("service failed with panic",
+				zap.String("supervisor", s.Name),
+				zap.String("version", s.Version),
+				zap.String("service", failedService.name),
+				zap.Float64("currentFailures", s.failures),
+				zap.Float64("failureThreshold", s.FailureThreshold),
+				zap.Bool("restarting", curState == normal),
+				zap.Error(err.(error)),
+			)
 		} else {
 			e := EventServiceTerminate{
 				Supervisor:       s,
@@ -550,12 +617,22 @@ func (s *Supervisor) handleFailedService(ctx context.Context, id serviceID, err 
 				e.Err = err
 			}
 			s.EventHook(e)
+
+			s.logger.Error("service failed and terminated",
+				zap.String("supervisor", s.Name),
+				zap.String("version", s.Version),
+				zap.String("service", failedService.name),
+				zap.Float64("currentFailures", s.failures),
+				zap.Float64("failureThreshold", s.FailureThreshold),
+				zap.Bool("restarting", curState == normal),
+				zap.Error(err.(error)),
+			)
 		}
 	}
 }
 
-func (s *Supervisor) runService(service Service, id serviceID) {
-	childCtx, cancel := context.WithCancel(s.ctx)
+func (s *Supervisor) runService(ctx context.Context, service Service, id serviceID) {
+	childCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	blockingCancellation := func() {
 		cancel()
@@ -611,6 +688,11 @@ func (s *Supervisor) removeService(id serviceID, notificationChan chan struct{})
 					Service:        namedService.Service,
 					ServiceName:    namedService.name,
 				})
+				s.logger.Error("Service failed to terminate in a timely manner",
+					zap.String("supervisor", s.Name),
+					zap.String("version", s.Version),
+					zap.String("service", namedService.name),
+				)
 			}
 			s.notifyServiceDone <- id
 		}()
@@ -621,15 +703,25 @@ func (s *Supervisor) removeService(id serviceID, notificationChan chan struct{})
 	}
 }
 
+func (s *Supervisor) shutdown() {
+	s.logger.Info("stop supervisor", zap.Duration("terminationWaitPeriod", s.terminationWaitPeriod))
+	time.Sleep(s.terminationWaitPeriod)
+	defer func() {
+		<-time.After(s.terminationGracePeriod)
+	}()
+	_ = s.stopSupervisor()
+}
+
 func (s *Supervisor) stopSupervisor() UnstoppedServiceReport {
 	notifyDone := make(chan serviceID, len(s.services))
 
 	for id, namedService := range s.services {
 		cancel := s.cancellations[id]
-		delete(s.services, id)
 		delete(s.cancellations, id)
 		s.servicesShuttingDown[id] = namedService
 		go func(sID serviceID) {
+			_ = s.services[sID].Service.Stop()
+			delete(s.services, sID)
 			cancel()
 			notifyDone <- sID
 		}(id)
@@ -653,6 +745,11 @@ SHUTTING_DOWN_SERVICES:
 					Service:        namedService.Service,
 					ServiceName:    namedService.name,
 				})
+				s.logger.Error("Service failed to terminate in a timely manner",
+					zap.String("supervisor", s.Name),
+					zap.String("version", s.Version),
+					zap.String("service", namedService.name),
+				)
 			}
 
 			// failed remove statements will log the errors.
@@ -776,6 +873,11 @@ func (s *Supervisor) RemoveAndWait(id ServiceToken, timeout time.Duration) error
 	case <-timeoutC:
 		return ErrTimeout
 	}
+}
+
+// Logger returns the supervisor logger. will be nil if New failed
+func (s *Supervisor) Logger() *zap.Logger {
+	return s.logger
 }
 
 /*

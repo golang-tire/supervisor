@@ -11,9 +11,10 @@ type Incrementor struct {
 	stop    chan bool
 }
 
-func (i *Incrementor) Stop() {
+func (i *Incrementor) Stop() error {
 	fmt.Println("Stopping the service")
 	i.stop <- true
+	return nil
 }
 
 func (i *Incrementor) Serve(ctx context.Context) error {
@@ -41,10 +42,12 @@ func ExampleNew_simple() {
 	service := &Incrementor{0, make(chan int), make(chan bool)}
 	supervisor.Add(service)
 
-	supervisor.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	supervisor.ServeBackground(ctx)
 
 	fmt.Println("Got:", <-service.next)
 	fmt.Println("Got:", <-service.next)
+	cancel()
 
 	// We sync here just to guarantee the output of "Stopping the service"
 	<-service.stop

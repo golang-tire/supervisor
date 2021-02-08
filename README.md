@@ -3,10 +3,9 @@ Supervisor
 supervisor is a renamed fork of [suture](github.com/thejerf/suture) with flowing changes:
 
     [x] - keep version 4 and remove others
-    [] - version: supervisor will receive a version to be used and printed in logs
-    [] - use zap as logger
+    [x] - version: supervisor will receive a version to be used and printed in logs
+    [x] - use zap as logger
     [x] - replace spec with option funcs
-    [x] - context removed from Serve and ServeBackground function inputs
 
 
 How to install

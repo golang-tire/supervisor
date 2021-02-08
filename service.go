@@ -69,6 +69,7 @@ fmt.Sprintf("%#v") will be used.
 */
 type Service interface {
 	Serve(ctx context.Context) error
+	Stop() error
 }
 
 // ErrDoNotRestart can be returned by a service to voluntarily not

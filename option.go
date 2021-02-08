@@ -1,7 +1,6 @@
 package supervisor
 
 import (
-	"context"
 	"time"
 )
 
@@ -72,10 +71,18 @@ func WithDontPropagateTermination(passThroughPanics bool) Option {
 	}
 }
 
-// WithContext is an option that allows you provide a context to use in service
-func WithContext(ctx context.Context) Option {
+// WithTerminationGracePeriod is an option that sets the TerminationGracePeriod
+func WithTerminationGracePeriod(terminationGracePeriod time.Duration) Option {
 	return func(s *Supervisor) error {
-		s.ctx = context.Background()
+		s.terminationGracePeriod = terminationGracePeriod
+		return nil
+	}
+}
+
+// WithTerminationWaitPeriod is an option that sets the TerminationWaitPeriod
+func WithTerminationWaitPeriod(terminationWaitPeriod time.Duration) Option {
+	return func(s *Supervisor) error {
+		s.terminationWaitPeriod = terminationWaitPeriod
 		return nil
 	}
 }

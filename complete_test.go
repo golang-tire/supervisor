@@ -17,6 +17,10 @@ type IncrementorJob struct {
 	next    chan int
 }
 
+func (i *IncrementorJob) Stop() error {
+	return nil
+}
+
 func (i *IncrementorJob) Serve(ctx context.Context) error {
 	for {
 		select {
@@ -39,7 +43,7 @@ func TestCompleteJob(t *testing.T) {
 	service := &IncrementorJob{0, make(chan int)}
 	supervisor.Add(service)
 
-	supervisor.ServeBackground()
+	supervisor.ServeBackground(context.Background())
 
 	fmt.Println("Got:", <-service.next)
 	fmt.Println("Got:", <-service.next)

@@ -27,10 +27,11 @@ var everMultistarted = false
 // Test that supervisors work perfectly when everything is hunky dory.
 func TestTheHappyCase(t *testing.T) {
 	// t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("A", WithContext(ctx))
+
+	s, err := NewSimple("A")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
+
 	if s.String() != "A" {
 		t.Fatal("Can't get name from a supervisor")
 	}
@@ -38,7 +39,8 @@ func TestTheHappyCase(t *testing.T) {
 
 	s.Add(service)
 
-	go s.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
 
 	<-service.started
 
@@ -56,14 +58,13 @@ func TestTheHappyCase(t *testing.T) {
 func TestAddingToRunningSupervisor(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	s, err := NewSimple("A1", WithContext(ctx))
+	s, err := NewSimple("A1")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
 
-	s.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.ServeBackground(ctx)
+	defer cancel()
 
 	service := NewService("B1")
 	s.Add(service)
@@ -80,12 +81,12 @@ func TestAddingToRunningSupervisor(t *testing.T) {
 func TestFailures(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("A2", WithFailureThreshold(3.5), WithContext(ctx))
+	s, err := NewSimple("A2", WithFailureThreshold(3.5))
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
 
-	go s.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
 	defer func() {
 		// to avoid deadlocks during shutdown, we have to not try to send
 		// things out on channels while we're shutting down (this undoes the
@@ -230,6 +231,23 @@ func TestFailures(t *testing.T) {
 	}
 }
 
+func TestRunningAlreadyRunning(t *testing.T) {
+	// t.Parallel()
+
+	s, err := NewSimple("A3")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
+	defer cancel()
+
+	// ensure the supervisor has made it to its main loop
+	s.sync()
+	if !panics(s.Serve) {
+		t.Fatal("Supervisor failed to prevent itself from double-running.")
+	}
+}
+
 func TestFullConstruction(t *testing.T) {
 	// t.Parallel()
 
@@ -252,18 +270,16 @@ func TestFullConstruction(t *testing.T) {
 func TestDefaultLogging(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("A4", WithContext(ctx))
+	s, err := NewSimple("A4")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-
 	service := NewService("B4")
 	s.Add(service)
 
 	s.FailureThreshold = .5
 	s.FailureBackoff = time.Millisecond * 25
-
-	go s.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
 	s.sync()
 
 	<-service.started
@@ -299,8 +315,7 @@ func TestDefaultLogging(t *testing.T) {
 func TestNestedSupervisors(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	super1, err := NewSimple("Top5", WithContext(ctx))
+	super1, err := NewSimple("Top5")
 	assert.Nil(t, err)
 	assert.NotNil(t, super1)
 
@@ -316,6 +331,7 @@ func TestNestedSupervisors(t *testing.T) {
 		}
 	}
 
+	super1.Add(super2)
 	super2.Add(service)
 
 	// test the functions got copied from super1; if this panics, it didn't
@@ -325,7 +341,8 @@ func TestNestedSupervisors(t *testing.T) {
 		service, service.name,
 	})
 
-	go super1.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go super1.Serve(ctx)
 	super1.sync()
 
 	<-service.started
@@ -336,16 +353,16 @@ func TestNestedSupervisors(t *testing.T) {
 
 func TestStoppingSupervisorStopsServices(t *testing.T) {
 	// t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("Top6", WithContext(ctx))
+
+	s, err := NewSimple("Top6")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-
 	service := NewService("Service 6")
 
 	s.Add(service)
 
-	go s.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
 	s.sync()
 
 	<-service.started
@@ -367,16 +384,15 @@ func TestStoppingSupervisorStopsServices(t *testing.T) {
 func TestStoppingStillWorksWithHungServices(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("Top7", WithContext(ctx))
+	s, err := NewSimple("Top7")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-
 	service := NewService("Service WillHang7")
 
 	s.Add(service)
 
-	go s.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
 
 	<-service.started
 
@@ -426,7 +442,7 @@ func TestRemovingHungService(t *testing.T) {
 
 	sToken := s.Add(service)
 
-	go s.Serve()
+	go s.Serve(context.Background())
 
 	<-service.started
 	service.take <- Hang
@@ -444,12 +460,11 @@ func TestRemoveService(t *testing.T) {
 	s, err := NewSimple("Top")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-
 	service := NewService("ServiceToRemove8")
 
 	id := s.Add(service)
 
-	go s.Serve()
+	go s.Serve(context.Background())
 
 	<-service.started
 	service.take <- UseStopChan
@@ -473,17 +488,14 @@ func TestRemoveService(t *testing.T) {
 func TestServiceReport(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("Top", WithContext(ctx))
+	s, err := NewSimple("Top", WithTimeout(time.Millisecond))
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-
-	s.Timeout = time.Millisecond
 	service := NewService("ServiceName")
 
 	id := s.Add(service)
-
-	go s.Serve()
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Serve(ctx)
 
 	<-service.started
 	service.take <- Hang
@@ -503,30 +515,168 @@ func TestServiceReport(t *testing.T) {
 	}
 }
 
-func TestPassNoContextToSupervisor(t *testing.T) {
+func TestFailureToConstruct(t *testing.T) {
+	// t.Parallel()
 
+	var s *Supervisor
+
+	panics(s.Serve)
+
+	s = new(Supervisor)
+	panics(s.Serve)
+}
+
+func TestFailingSupervisors(t *testing.T) {
+	// t.Parallel()
+
+	// This is a bit of a complicated test, so let me explain what
+	// all this is doing:
+	// 1. Set up a top-level supervisor with a hair-trigger backoff.
+	// 2. Add a supervisor to that.
+	// 3. To that supervisor, add a service.
+	// 4. Panic the supervisor in the middle, sending the top-level into
+	//    backoff.
+	// 5. Kill the lower level service too.
+	// 6. Verify that when the top-level service comes out of backoff,
+	//    the service ends up restarted as expected.
+
+	// Ultimately, we can't have more than a best-effort recovery here.
+	// A panic'ed supervisor can't really be trusted to have consistent state,
+	// and without *that*, we can't trust it to do anything sensible with
+	// the children it may have been running. So unlike Erlang, we can't
+	// can't really expect to be able to safely restart them or anything.
+	// Really, the "correct" answer is that the Supervisor must never panic,
+	// but in the event that it does, this verifies that it at least tries
+	// to get on with life.
+
+	// This also tests that if a Supervisor itself panics, and one of its
+	// monitored services goes down in the meantime, that the monitored
+	// service also gets correctly restarted when the supervisor does.
+
+	s1, err := NewSimple("Top9")
+	assert.Nil(t, err)
+	assert.NotNil(t, s1)
+	s2, err := NewSimple("Nested9")
+	assert.Nil(t, err)
+	assert.NotNil(t, s2)
+	service := NewService("Service9")
+
+	s1.Add(s2)
+	s2.Add(service)
+
+	// start the top-level supervisor...
+	ctx, cancel := context.WithCancel(context.Background())
+	go s1.Serve(ctx)
+	defer cancel()
+	// and sync on the service being started.
+	<-service.started
+
+	// Set the failure threshold such that even one failure triggers
+	// backoff on the top-level supervisor.
+	s1.FailureThreshold = .5
+
+	// This lets us control exactly when the top-level supervisor comes
+	// back from its backoff, by forcing it to block on this channel
+	// being sent something in order to come back.
+	resumeChan := make(chan time.Time)
+	s1.getAfterChan = func(d time.Duration) <-chan time.Time {
+		return resumeChan
+	}
+	failNotify := make(chan string)
+	// synchronize on the expected failure of the middle supervisor
+	s1.EventHook = func(e Event) {
+		if e.Type() == EventTypeServicePanic {
+			failNotify <- fmt.Sprintf("%s", e.(EventServicePanic).Service)
+		}
+	}
+
+	// Now, the middle supervisor panics and dies.
+	s2.panic()
+
+	// Receive the notification from the hacked log message from the
+	// top-level supervisor that the middle has failed.
+	failing := <-failNotify
+	// that's enough sync to guarantee this:
+	if failing != "Nested9" || s1.state != paused {
+		t.Fatal("Top-level supervisor did not go into backoff as expected")
+	}
+
+	// Tell the service to fail. Note the top-level supervisor has
+	// still not restarted the middle supervisor.
+	service.take <- Fail
+
+	// We now permit the top-level supervisor to resume. It should
+	// restart the middle supervisor, which should then restart the
+	// child service...
+	resumeChan <- time.Time{}
+
+	// which we can pick up from here. If this successfully restarts,
+	// then the whole chain must have worked.
+	<-service.started
+}
+
+func TestNilSupervisorAdd(t *testing.T) {
+	// t.Parallel()
+
+	var s *Supervisor
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("did not panic as expected on nil add")
+		}
+	}()
+
+	s.Add(s)
+}
+
+func TestPassNoContextToSupervisor(t *testing.T) {
 	s, err := NewSimple("main")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
 	service := NewService("B")
 	s.Add(service)
 
-	go s.Serve()
+	go s.Serve(nil)
 	<-service.started
 
 	s.ctxCancel()
 }
 
+func TestNilSupervisorPanicsAsExpected(t *testing.T) {
+	s := (*Supervisor)(nil)
+	if !panicsWith(s.Serve, "with a nil *suture.Supervisor") {
+		t.Fatal("nil supervisor doesn't panic as expected")
+	}
+}
+
+// https://github.com/thejerf/suture/issues/11
+//
+// The purpose of this test is to verify that it does not cause data races,
+// so there are no obvious assertions.
+func TestIssue11(t *testing.T) {
+	// t.Parallel()
+
+	s, err := NewSimple("main")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+	s.ServeBackground(context.Background())
+
+	subsuper, err := NewSimple("sub")
+	assert.Nil(t, err)
+	assert.NotNil(t, subsuper)
+	s.Add(subsuper)
+
+	subsuper.Add(NewService("may cause data race"))
+}
+
 func TestRemoveAndWait(t *testing.T) {
 	// t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s, err := NewSimple("main", WithContext(ctx))
+	s, err := NewSimple("main", WithTimeout(time.Second))
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-	s.Timeout = time.Second
-
-	s.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.ServeBackground(ctx)
 
 	service := NewService("A1")
 	token := s.Add(service)
@@ -576,13 +726,11 @@ func TestRemoveAndWait(t *testing.T) {
 
 	// Abnormal case: The service takes long to terminate, which takes more than the timeout of the spec, but
 	// if the service eventually terminates, this does not hang RemoveAndWait.
-	s, err = NewSimple("main")
+	s, err = NewSimple("main", WithTimeout(time.Millisecond))
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
-
-	s.Timeout = time.Millisecond
 	ctx, cancel = context.WithCancel(context.Background())
-	s.ServeBackground()
+	s.ServeBackground(ctx)
 	defer cancel()
 	service = NewService("A1")
 	token = s.Add(service)
@@ -600,6 +748,23 @@ func TestRemoveAndWait(t *testing.T) {
 	}
 }
 
+func TestSupervisorManagementIssue35(t *testing.T) {
+	s, err := NewSimple("issue 35")
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+	for i := 1; i < 100; i++ {
+		s2, err := NewSimple("test")
+		assert.Nil(t, err)
+		assert.NotNil(t, s2)
+		s.Add(s2)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.ServeBackground(ctx)
+	// should not have any panics
+	cancel()
+}
+
 func TestCoverage(t *testing.T) {
 	New("testing coverage", "", WithEventHook(func(Event) {}))
 	NoJitter{}.Jitter(time.Millisecond)
@@ -610,9 +775,7 @@ func TestStopAfterRemoveAndWait(t *testing.T) {
 
 	var badStopError error
 
-	ctx, cancel := context.WithCancel(context.Background())
 	s, err := NewSimple("main",
-		WithContext(ctx),
 		WithTimeout(time.Second),
 		WithEventHook(func(e Event) {
 			if e.Type() == EventTypeStopTimeout {
@@ -622,7 +785,11 @@ func TestStopAfterRemoveAndWait(t *testing.T) {
 		}),
 	)
 
-	s.ServeBackground()
+	assert.Nil(t, err)
+	assert.NotNil(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.ServeBackground(ctx)
 
 	service := NewService("A1")
 	token := s.Add(service)
@@ -640,6 +807,100 @@ func TestStopAfterRemoveAndWait(t *testing.T) {
 
 	if badStopError != nil {
 		t.Fatal("Unexpected timeout while stopping supervisor: " + badStopError.Error())
+	}
+}
+
+// This tests that the entire supervisor tree is terminated when a service
+// returns returns ErrTerminateTree directly.
+func TestServiceAndTreeTermination(t *testing.T) {
+	// t.Parallel()
+	s1, err := NewSimple("TestTreeTermination1")
+	assert.Nil(t, err)
+	assert.NotNil(t, s1)
+	s2, err := NewSimple("TestTreeTermination2")
+	assert.Nil(t, err)
+	assert.NotNil(t, s2)
+	s1.Add(s2)
+
+	service1 := NewService("TestTreeTerminationService1")
+	service2 := NewService("TestTreeTerminationService2")
+	service3 := NewService("TestTreeTerminationService2")
+	s2.Add(service1)
+	s2.Add(service2)
+	s2.Add(service3)
+
+	terminated := make(chan struct{})
+	go func() {
+		// we don't need the context because the service is going
+		// to terminate the supervisor.
+		s1.Serve(nil)
+		terminated <- struct{}{}
+	}()
+
+	<-service1.started
+	<-service2.started
+	<-service3.started
+
+	// OK, everything is up and running. Start by telling one service
+	// to terminate itself, and verify it isn't restarted.
+	service3.take <- DoNotRestart
+
+	// I've got nothing other than just waiting for a suitable period
+	// of time and hoping for the best here; it's hard to synchronize
+	// on an event not happening...!
+	time.Sleep(250 * time.Microsecond)
+	service3.m.Lock()
+	service3Running := service3.running
+	service3.m.Unlock()
+
+	if service3Running {
+		t.Fatal("service3 was restarted")
+	}
+
+	service1.take <- TerminateTree
+	<-terminated
+
+	if service1.running || service2.running || service3.running {
+		t.Fatal("Didn't shut services & tree down properly.")
+	}
+}
+
+// Test that supervisors set to not propagate service failures upwards will
+// not kill the whole tree.
+func TestDoNotPropagate(t *testing.T) {
+	s1, err := NewSimple("TestDoNotPropagate")
+	assert.Nil(t, err)
+	assert.NotNil(t, s1)
+	s2, err := New("TestDoNotPropgate Subtree", "", WithDontPropagateTermination(true))
+	assert.Nil(t, err)
+	assert.NotNil(t, s2)
+	s1.Add(s2)
+
+	service1 := NewService("should keep running")
+	service2 := NewService("should end up terminating")
+	s1.Add(service1)
+	s2.Add(service2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go s1.Serve(ctx)
+	defer cancel()
+
+	<-service1.started
+	<-service2.started
+
+	fmt.Println("Service about to take")
+	service2.take <- TerminateTree
+	fmt.Println("Service took")
+	time.Sleep(time.Millisecond)
+
+	if service2.running {
+		t.Fatal("service 2 should have terminated")
+	}
+	if s2.state != terminated {
+		t.Fatal("child supervisor should be terminated")
+	}
+	if s1.state != normal {
+		t.Fatal("parent supervisor should be running")
 	}
 }
 
@@ -663,16 +924,18 @@ func TestAddAfterStopping(t *testing.T) {
 	s, err := NewSimple("main")
 	assert.Nil(t, err)
 	assert.NotNil(t, s)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	service := NewService("A1")
 	supDone := make(chan struct{})
 	addDone := make(chan struct{})
 
 	go func() {
-		s.Serve()
+		s.Serve(ctx)
 		close(supDone)
 	}()
 
+	cancel()
 	<-supDone
 
 	go func() {
@@ -751,8 +1014,18 @@ func (s *FailableService) Serve(ctx context.Context) error {
 			case DoNotRestart:
 				return ErrDoNotRestart
 			}
+		case <-ctx.Done():
+			s.existing--
+			if useStopChan {
+				s.stop <- true
+			}
+			return ctx.Err()
 		}
 	}
+}
+
+func (s *FailableService) Stop() error {
+	return nil
 }
 
 func (s *FailableService) String() string {
@@ -794,6 +1067,10 @@ type NowFeeder struct {
 type BarelyService struct{}
 
 func (bs *BarelyService) Serve(context context.Context) error {
+	return nil
+}
+
+func (bs *BarelyService) Stop() error {
 	return nil
 }
 
